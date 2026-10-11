@@ -392,6 +392,36 @@ BOOL ShouldUseDarkMode()
 	return false;
 }
 
+// Append arg to the nvim command line as one argument, quoted the way CommandLineToArgvW
+// (and nvim's own argument parsing) reads it back: quotes inside it are escaped, and
+// backslashes are doubled where they come before a quote (so "C:\dir\" survives).
+// cmd_len is the length in characters, not bytes. Returns false if the result would be
+// longer than Windows allows (32767 characters) or memory runs out.
+static bool AppendQuotedArg(wchar_t **cmd, size_t *cmd_len, const wchar_t *arg) {
+	const size_t arg_len = wcslen(arg);
+	const size_t max_len = *cmd_len + 3 + 2 * arg_len; // space, 2 quotes, every char escaped
+	wchar_t *buf = static_cast<wchar_t *>(realloc(*cmd, sizeof(wchar_t) * (max_len + 1)));
+	if (!buf) return false;
+	*cmd = buf;
+	size_t n = *cmd_len;
+	buf[n++] = L' ';
+	buf[n++] = L'"';
+	size_t backslashes = 0;
+	for (const wchar_t *p = arg; *p; ++p) {
+		if (*p == L'"') {
+			for (size_t k = 0; k <= backslashes; ++k) buf[n++] = L'\\';
+		}
+		backslashes = (*p == L'\\') ? backslashes + 1 : 0;
+		buf[n++] = *p;
+	}
+	for (size_t k = 0; k < backslashes; ++k) buf[n++] = L'\\';
+	buf[n++] = L'"';
+	buf[n] = 0;
+	if (n >= 32767) return false;
+	*cmd_len = n;
+	return true;
+}
+
 int WINAPI wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev_instance, _In_ LPWSTR p_cmd_line, _In_ int n_cmd_show) {
 	SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE);
 
@@ -467,24 +497,11 @@ int WINAPI wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev_instance, _
 		}
 		// Already processed
 		else if (!wcsncmp(cmd_line_args[i], L"--neovim-bin=", wcslen(L"--neovim-bin="))) {}
-		// Otherwise assume the argument is a filename to open
+		// Otherwise pass the argument on to nvim (a file name, +line, -c ..., and so on)
 		else {
-			// Otherwise assume switch is for nvim initialization
-			const size_t arg_len = wcslen(cmd_line_args[i])  /* space */;
-			if (nvim_cmd_len + arg_len + 4 >= 32767) {
-				MessageBoxA(NULL, "ERROR: File path too long", "Nvy", MB_OK | MB_ICONERROR);
+			if (!AppendQuotedArg(&nvim_cmd, &nvim_cmd_len, cmd_line_args[i])) {
+				MessageBoxA(NULL, "ERROR: Command line too long", "Nvy", MB_OK | MB_ICONERROR);
 				return 1;
-			}
-			size_t tmp_len = sizeof(wchar_t) * (nvim_cmd_len + arg_len + 4);
-			wchar_t *tmp = static_cast<wchar_t *>(realloc(nvim_cmd, tmp_len));
-			if (tmp) {
-				nvim_cmd = tmp;
-				nvim_cmd_len = tmp_len;
-				wcscat_s(nvim_cmd, tmp_len, L" \"");
-				wcscat_s(nvim_cmd, tmp_len,cmd_line_args[i]);
-				wcscat_s(nvim_cmd, tmp_len, L"\"");
-			} else {
-				break; // not enough memory to continue
 			}
 		}
 	}
